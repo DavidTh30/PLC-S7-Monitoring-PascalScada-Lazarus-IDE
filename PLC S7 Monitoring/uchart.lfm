@@ -671,7 +671,7 @@ object frmChart: TfrmChart
           Top = 344
           Width = 236
           AutoSize = False
-          Caption = 'Select a series in the list on the left to change its style. Untick it there to hide it. Axis range and offset apply when separate value axes are on. Tip: drag a value axis up/down with the left mouse button to offset it, use the mouse wheel over it to zoom just that axis; double-click it to reset.'
+          Caption = 'Select a series in the list on the left to change its style. Untick it there to hide it. Axis range and offset apply when separate value axes are on. Tip: drag a value axis up/down with the left mouse button to offset it, use the mouse wheel over it to zoom just that axis; double-click it to reset. Over the time axis the wheel zooms and a left drag pans time only.'
           WordWrap = True
         end
       end

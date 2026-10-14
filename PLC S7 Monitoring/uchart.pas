@@ -164,11 +164,14 @@ type
     // axis offset dragging
     FDragEntry: TChartEntry;   // nil = shared axis drag when FDragShared
     FDragShared: Boolean;
+    FDragTime: Boolean;        // panning the time axis
+    FDragX0: Integer;
     FDragY0: Integer;
     FDragOff0: Double;
     FDragExt0: TDoubleRect;
     function AxisEntryAt(X, Y: Integer): TChartEntry;
     function SharedAxisAt(X, Y: Integer): Boolean;
+    function TimeAxisAt(X, Y: Integer): Boolean;
     function NearestIndex(ASeries: TLineSeries; AX: Double): Integer;
     function ValueToImageY(e: TChartEntry; AValue: Double): Integer;
     procedure SetEntryOffset(e: TChartEntry; AOffset: Double);
@@ -417,7 +420,7 @@ begin
   // While zoomed the view stays where the user put it; Reset zoom returns to live
   btnResetZoom.Enabled := chMain.IsZoomed;
   if chMain.IsZoomed then
-    lblZoomState.Caption := 'Zoomed - live view held'
+    lblZoomState.Caption := 'Zoomed (live held)'
   else if FPaused then
     lblZoomState.Caption := 'Paused'
   else
@@ -641,6 +644,14 @@ begin
      chMain.LeftAxis.IsPointInside(Point(X + 18, Y)));
 end;
 
+function TfrmChart.TimeAxisAt(X, Y: Integer): Boolean;
+begin
+  // IsPointInside covers the time labels strip; also accept the title below it
+  Result := chMain.BottomAxis.Visible and
+    (chMain.BottomAxis.IsPointInside(Point(X, Y)) or
+     chMain.BottomAxis.IsPointInside(Point(X, Y - 18)));
+end;
+
 procedure TfrmChart.SetEntryOffset(e: TChartEntry; AOffset: Double);
 begin
   SetEntryTransform(e, e.OffT.Scale, AOffset);
@@ -693,6 +704,19 @@ begin
     ext.b.Y := g0 + (ext.b.Y - g0) / AFactor;
     chMain.LogicalExtent := ext;
     Result := True;
+  end
+  else if TimeAxisAt(APoint.X, APoint.Y) then
+  begin
+    // Time axis: zoom horizontally around the time under the mouse.
+    // Like any zoom this holds the live view until Reset zoom.
+    g0 := chMain.XImageToGraph(APoint.X);
+    ext := chMain.LogicalExtent;
+    if (ext.b.X - ext.a.X) / AFactor < 1 / SecsPerDay then
+      Exit(True); // don't zoom in below one second
+    ext.a.X := g0 - (g0 - ext.a.X) / AFactor;
+    ext.b.X := g0 + (ext.b.X - g0) / AFactor;
+    chMain.LogicalExtent := ext;
+    Result := True;
   end;
 end;
 
@@ -716,24 +740,38 @@ begin
     Exit;
   FDragEntry := AxisEntryAt(X, Y);
   FDragShared := (FDragEntry = nil) and SharedAxisAt(X, Y);
+  FDragTime := (FDragEntry = nil) and not FDragShared and TimeAxisAt(X, Y);
   FDragY0 := Y;
+  FDragX0 := X;
   if Assigned(FDragEntry) then
   begin
     FDragOff0 := FDragEntry.OffT.Offset;
     clbSeries.ItemIndex := FEntries.IndexOf(FDragEntry);
     LoadSeriesControls;
   end
-  else if FDragShared then
+  else if FDragShared or FDragTime then
     FDragExt0 := chMain.LogicalExtent;
 end;
 
 procedure TfrmChart.chMainMouseMove(Sender: TObject; Shift: TShiftState; X,
   Y: Integer);
 var
-  h, dg: Double;
+  h, w, dg: Double;
   ext: TDoubleRect;
 begin
   h := chMain.ClipRect.Bottom - chMain.ClipRect.Top;
+  w := chMain.ClipRect.Right - chMain.ClipRect.Left;
+  if FDragTime and (ssLeft in Shift) and (w > 0) then
+  begin
+    // Time axis drag: the curves follow the mouse (drag right = earlier time).
+    // Like a zoom, this holds the live view until Reset zoom.
+    ext := FDragExt0;
+    dg := (X - FDragX0) / w * (ext.b.X - ext.a.X);
+    ext.a.X := ext.a.X - dg;
+    ext.b.X := ext.b.X - dg;
+    chMain.LogicalExtent := ext;
+    Exit;
+  end;
   if Assigned(FDragEntry) and (ssLeft in Shift) and (h > 0) then
   begin
     // Dragging down moves the series (and its scale) down
@@ -754,6 +792,8 @@ begin
   // Hover feedback
   if (AxisEntryAt(X, Y) <> nil) or SharedAxisAt(X, Y) then
     chMain.Cursor := crSizeNS
+  else if TimeAxisAt(X, Y) then
+    chMain.Cursor := crSizeWE
   else if chkCrosshair.Checked and PtInRect(chMain.ClipRect, Point(X, Y)) then
     chMain.Cursor := crCross
   else
@@ -773,6 +813,7 @@ procedure TfrmChart.chMainMouseUp(Sender: TObject; Button: TMouseButton;
 begin
   FDragEntry := nil;
   FDragShared := False;
+  FDragTime := False;
 end;
 
 procedure TfrmChart.chMainDblClick(Sender: TObject);
@@ -785,7 +826,7 @@ begin
   e := AxisEntryAt(p.X, p.Y);
   if Assigned(e) then
     SetEntryTransform(e, 1, 0)
-  else if SharedAxisAt(p.X, p.Y) then
+  else if SharedAxisAt(p.X, p.Y) or TimeAxisAt(p.X, p.Y) then
     chMain.ZoomFull;
 end;
 
