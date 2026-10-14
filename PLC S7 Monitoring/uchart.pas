@@ -33,7 +33,9 @@ type
     Trans: TChartAxisTransformations;
     AutoT: TAutoScaleAxisTransform;
     LinT: TLinearAxisTransform;
-    OffT: TLinearAxisTransform; // manual vertical offset, in graph units (0..1 = plot height)
+    // Manual axis offset/zoom applied after the scaling: graph = g * Scale + Offset
+    // (graph units, 0..1 = plot height). Set by dragging / mouse wheel on the axis.
+    OffT: TLinearAxisTransform;
     AutoScale: Boolean;
     YMin, YMax: Double;
   end;
@@ -57,6 +59,8 @@ type
     chkCrosshair: TCheckBox;
     chkSAuto: TCheckBox;
     fseSOffset: TFloatSpinEdit;
+    fseSZoom: TFloatSpinEdit;
+    lblSZoom: TLabel;
     lblSOffset: TLabel;
     chkSeparateAxes: TCheckBox;
     fseSMax: TFloatSpinEdit;
@@ -168,6 +172,10 @@ type
     function NearestIndex(ASeries: TLineSeries; AX: Double): Integer;
     function ValueToImageY(e: TChartEntry; AValue: Double): Integer;
     procedure SetEntryOffset(e: TChartEntry; AOffset: Double);
+    procedure SetEntryTransform(e: TChartEntry; AScale, AOffset: Double);
+    function AxisWheelZoom(APoint: TPoint; AFactor: Double): Boolean;
+    procedure WheelUpBefore(ATool: TChartTool; APoint: TPoint);
+    procedure WheelDownBefore(ATool: TChartTool; APoint: TPoint);
     procedure CreateTools;
     procedure ApplyZoomMode;
     procedure ApplyAxes;
@@ -215,6 +223,7 @@ const
   LineStyles: array[0..3] of TPenStyle = (psSolid, psDash, psDot, psDashDot);
 
   SEC = 'Chart';
+  AXIS_WHEEL = 1.2; // zoom step per wheel notch on a value axis
 
 function StyleIndex(AStyle: TPenStyle): Integer;
 begin
@@ -564,6 +573,9 @@ begin
   FZoomWheel := TZoomMouseWheelTool.Create(FToolset);
   FZoomWheel.Toolset := FToolset;
   FZoomWheel.FixedPoint := True;
+  // Wheel over a value axis zooms only that axis
+  FZoomWheel.OnBeforeMouseWheelUp := @WheelUpBefore;
+  FZoomWheel.OnBeforeMouseWheelDown := @WheelDownBefore;
 
   chMain.Toolset := FToolset;
 end;
@@ -631,16 +643,69 @@ end;
 
 procedure TfrmChart.SetEntryOffset(e: TChartEntry; AOffset: Double);
 begin
+  SetEntryTransform(e, e.OffT.Scale, AOffset);
+end;
+
+procedure TfrmChart.SetEntryTransform(e: TChartEntry; AScale, AOffset: Double);
+begin
+  e.OffT.Scale := AScale;
   e.OffT.Offset := AOffset;
   if (FEntries.IndexOf(e) = clbSeries.ItemIndex) and not FUpdating then
   begin
     FUpdating := True;
     try
       fseSOffset.Value := AOffset * 100;
+      fseSZoom.Value := AScale;
     finally
       FUpdating := False;
     end;
   end;
+end;
+
+{ ---------- per-axis wheel zoom ---------- }
+
+function TfrmChart.AxisWheelZoom(APoint: TPoint; AFactor: Double): Boolean;
+var
+  e: TChartEntry;
+  g0: Double;
+  ext: TDoubleRect;
+begin
+  Result := False;
+  g0 := chMain.YImageToGraph(APoint.Y);
+  e := AxisEntryAt(APoint.X, APoint.Y);
+  if Assigned(e) then
+  begin
+    // Zoom this axis only, keeping the value under the mouse in place:
+    // g' = g0 + (g - g0) * k, with g = s * Scale + Offset
+    if (e.OffT.Scale * AFactor < 0.01) or (e.OffT.Scale * AFactor > 1000) then
+      Exit(True);
+    SetEntryTransform(e, e.OffT.Scale * AFactor,
+      g0 + (e.OffT.Offset - g0) * AFactor);
+    clbSeries.ItemIndex := FEntries.IndexOf(e);
+    LoadSeriesControls;
+    Result := True;
+  end
+  else if SharedAxisAt(APoint.X, APoint.Y) then
+  begin
+    // Single shared axis: zoom the vertical extent around the mouse
+    ext := chMain.LogicalExtent;
+    ext.a.Y := g0 - (g0 - ext.a.Y) / AFactor;
+    ext.b.Y := g0 + (ext.b.Y - g0) / AFactor;
+    chMain.LogicalExtent := ext;
+    Result := True;
+  end;
+end;
+
+procedure TfrmChart.WheelUpBefore(ATool: TChartTool; APoint: TPoint);
+begin
+  if AxisWheelZoom(APoint, AXIS_WHEEL) then
+    ATool.Handled; // keep the chart-wide wheel zoom out of it
+end;
+
+procedure TfrmChart.WheelDownBefore(ATool: TChartTool; APoint: TPoint);
+begin
+  if AxisWheelZoom(APoint, 1 / AXIS_WHEEL) then
+    ATool.Handled;
 end;
 
 procedure TfrmChart.chMainMouseDown(Sender: TObject; Button: TMouseButton;
@@ -715,11 +780,11 @@ var
   p: TPoint;
   e: TChartEntry;
 begin
-  // Double-click a value axis to remove its offset
+  // Double-click a value axis to remove its offset and zoom
   p := chMain.ScreenToClient(Mouse.CursorPos);
   e := AxisEntryAt(p.X, p.Y);
   if Assigned(e) then
-    SetEntryOffset(e, 0)
+    SetEntryTransform(e, 1, 0)
   else if SharedAxisAt(p.X, p.Y) then
     chMain.ZoomFull;
 end;
@@ -729,7 +794,7 @@ var
   e: TChartEntry;
 begin
   for e in FEntries do
-    SetEntryOffset(e, 0);
+    SetEntryTransform(e, 1, 0);
 end;
 
 { ---------- crosshair ---------- }
@@ -920,6 +985,7 @@ begin
   // per-series range only matters when each series has its own axis
   chkSAuto.Enabled := has and chkSeparateAxes.Checked;
   fseSOffset.Enabled := chkSAuto.Enabled;
+  fseSZoom.Enabled := chkSAuto.Enabled;
   fseSMin.Enabled := chkSAuto.Enabled and not chkSAuto.Checked;
   fseSMax.Enabled := fseSMin.Enabled;
   if not has then
@@ -941,6 +1007,7 @@ begin
     fseSMin.Value := e.YMin;
     fseSMax.Value := e.YMax;
     fseSOffset.Value := e.OffT.Offset * 100;
+    fseSZoom.Value := e.OffT.Scale;
     fseSMin.Enabled := chkSAuto.Enabled and not e.AutoScale;
     fseSMax.Enabled := fseSMin.Enabled;
   finally
@@ -963,6 +1030,7 @@ begin
   FEntries[i].YMin := fseSMin.Value;
   FEntries[i].YMax := fseSMax.Value;
   FEntries[i].OffT.Offset := fseSOffset.Value / 100;
+  FEntries[i].OffT.Scale := fseSZoom.Value;
   fseSMin.Enabled := chkSAuto.Enabled and not chkSAuto.Checked;
   fseSMax.Enabled := fseSMin.Enabled;
   ApplyAxes;
@@ -1046,6 +1114,7 @@ begin
     ini.WriteFloat(SEC, k + '.YMin', e.YMin);
     ini.WriteFloat(SEC, k + '.YMax', e.YMax);
     ini.WriteFloat(SEC, k + '.Offset', e.OffT.Offset);
+    ini.WriteFloat(SEC, k + '.Zoom', e.OffT.Scale);
   end;
 end;
 
@@ -1103,6 +1172,7 @@ begin
       e.YMin := ini.ReadFloat(SEC, k + '.YMin', 0);
       e.YMax := ini.ReadFloat(SEC, k + '.YMax', 100);
       e.OffT.Offset := ini.ReadFloat(SEC, k + '.Offset', 0);
+      e.OffT.Scale := EnsureRange(ini.ReadFloat(SEC, k + '.Zoom', 1), 0.01, 1000);
       clbSeries.Checked[j] := e.Series.Active;
     end;
   finally

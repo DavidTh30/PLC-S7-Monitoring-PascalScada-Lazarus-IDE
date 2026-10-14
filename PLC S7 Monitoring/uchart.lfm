@@ -479,7 +479,7 @@ object frmChart: TfrmChart
           Height = 28
           Top = 296
           Width = 236
-          Caption = 'Reset all axis offsets'
+          Caption = 'Reset all axis offsets and zoom'
           OnClick = btnResetOffsetsClick
           TabOrder = 9
         end
@@ -644,13 +644,34 @@ object frmChart: TfrmChart
           OnChange = SeriesSettingChange
           TabOrder = 7
         end
+        object lblSZoom: TLabel
+          Left = 8
+          Height = 15
+          Top = 312
+          Width = 100
+          Caption = 'Axis zoom (x)'
+        end
+        object fseSZoom: TFloatSpinEdit
+          Left = 136
+          Height = 23
+          Top = 308
+          Width = 108
+          DecimalPlaces = 2
+          Enabled = False
+          Increment = 0.1
+          MaxValue = 1000
+          MinValue = 0.01
+          OnChange = SeriesSettingChange
+          TabOrder = 8
+          Value = 1
+        end
         object lblSeriesHint: TLabel
           Left = 8
-          Height = 96
-          Top = 314
+          Height = 110
+          Top = 344
           Width = 236
           AutoSize = False
-          Caption = 'Select a series in the list on the left to change its style. Untick it there to hide it. Axis range and offset apply when separate value axes are on. Tip: drag a value axis up/down with the left mouse button to offset it; double-click it to reset.'
+          Caption = 'Select a series in the list on the left to change its style. Untick it there to hide it. Axis range and offset apply when separate value axes are on. Tip: drag a value axis up/down with the left mouse button to offset it, use the mouse wheel over it to zoom just that axis; double-click it to reset.'
           WordWrap = True
         end
       end
