@@ -11,7 +11,7 @@ unit uchart;
 interface
 
 uses
-  Classes, SysUtils, IniFiles, fgl, Forms, Controls, Graphics, Dialogs, StdCtrls,
+  Classes, SysUtils, Types, Math, IniFiles, fgl, Forms, Controls, Graphics, Dialogs, StdCtrls,
   ExtCtrls, ComCtrls, CheckLst, Spin, TAGraph, TASeries, TAIntervalSources,
   TAChartUtils, TALegend, TATypes, TATextElements, TACustomSource, TAChartAxis, TAChartAxisUtils, TATransformations, TATools,
   tag, plctag, plcnumber;
@@ -33,6 +33,7 @@ type
     Trans: TChartAxisTransformations;
     AutoT: TAutoScaleAxisTransform;
     LinT: TLinearAxisTransform;
+    OffT: TLinearAxisTransform; // manual vertical offset, in graph units (0..1 = plot height)
     AutoScale: Boolean;
     YMin, YMax: Double;
   end;
@@ -52,7 +53,11 @@ type
     cbLineStyle: TComboBox;
     cbTimeFormat: TComboBox;
     cbZoomMode: TComboBox;
+    btnResetOffsets: TButton;
+    chkCrosshair: TCheckBox;
     chkSAuto: TCheckBox;
+    fseSOffset: TFloatSpinEdit;
+    lblSOffset: TLabel;
     chkSeparateAxes: TCheckBox;
     fseSMax: TFloatSpinEdit;
     fseSMin: TFloatSpinEdit;
@@ -113,7 +118,17 @@ type
     procedure btnExportClick(Sender: TObject);
     procedure btnPauseClick(Sender: TObject);
     procedure btnRemoveClick(Sender: TObject);
+    procedure btnResetOffsetsClick(Sender: TObject);
     procedure btnResetZoomClick(Sender: TObject);
+    procedure chkCrosshairChange(Sender: TObject);
+    procedure chMainAfterPaint(ASender: TChart);
+    procedure chMainDblClick(Sender: TObject);
+    procedure chMainMouseDown(Sender: TObject; Button: TMouseButton;
+      Shift: TShiftState; X, Y: Integer);
+    procedure chMainMouseLeave(Sender: TObject);
+    procedure chMainMouseMove(Sender: TObject; Shift: TShiftState; X, Y: Integer);
+    procedure chMainMouseUp(Sender: TObject; Button: TMouseButton;
+      Shift: TShiftState; X, Y: Integer);
     procedure btnSettingsClick(Sender: TObject);
     procedure cbZoomModeChange(Sender: TObject);
     procedure chkOnTopChange(Sender: TObject);
@@ -139,6 +154,20 @@ type
     FZoomDrag: TZoomDragTool;
     FPanDrag: TPanDragTool;
     FZoomWheel: TZoomMouseWheelTool;
+    // crosshair
+    FCrossPos: TPoint;
+    FCrossVisible: Boolean;
+    // axis offset dragging
+    FDragEntry: TChartEntry;   // nil = shared axis drag when FDragShared
+    FDragShared: Boolean;
+    FDragY0: Integer;
+    FDragOff0: Double;
+    FDragExt0: TDoubleRect;
+    function AxisEntryAt(X, Y: Integer): TChartEntry;
+    function SharedAxisAt(X, Y: Integer): Boolean;
+    function NearestIndex(ASeries: TLineSeries; AX: Double): Integer;
+    function ValueToImageY(e: TChartEntry; AValue: Double): Integer;
+    procedure SetEntryOffset(e: TChartEntry; AOffset: Double);
     procedure CreateTools;
     procedure ApplyZoomMode;
     procedure ApplyAxes;
@@ -211,6 +240,7 @@ begin
   chMain.LeftAxis.Title.Visible := True;
   chMain.LeftAxis.Title.LabelFont.Orientation := 900;
 
+  chMain.DoubleBuffered := True;
   CreateTools;
   ApplyZoomMode;
 
@@ -289,6 +319,8 @@ begin
   e.LinT := TLinearAxisTransform.Create(e.Trans);
   e.LinT.Transformations := e.Trans;
   e.LinT.Enabled := False;
+  e.OffT := TLinearAxisTransform.Create(e.Trans); // applied after the scaling
+  e.OffT.Transformations := e.Trans;
 
   e.Axis := chMain.AxisList.Add;
   e.Axis.Alignment := calLeft;
@@ -572,6 +604,271 @@ begin
   chMain.ZoomFull;
 end;
 
+{ ---------- axis offset (drag a value axis with the left mouse button) ---------- }
+
+function TfrmChart.AxisEntryAt(X, Y: Integer): TChartEntry;
+var
+  e: TChartEntry;
+begin
+  Result := nil;
+  if not chkSeparateAxes.Checked then
+    Exit;
+  // IsPointInside covers the axis marks strip; also accept the title just left of it
+  for e in FEntries do
+    if e.Axis.Visible and e.Axis.IsPointInside(Point(X, Y)) then
+      Exit(e);
+  for e in FEntries do
+    if e.Axis.Visible and e.Axis.IsPointInside(Point(X + 18, Y)) then
+      Exit(e);
+end;
+
+function TfrmChart.SharedAxisAt(X, Y: Integer): Boolean;
+begin
+  Result := chMain.LeftAxis.Visible and
+    (chMain.LeftAxis.IsPointInside(Point(X, Y)) or
+     chMain.LeftAxis.IsPointInside(Point(X + 18, Y)));
+end;
+
+procedure TfrmChart.SetEntryOffset(e: TChartEntry; AOffset: Double);
+begin
+  e.OffT.Offset := AOffset;
+  if (FEntries.IndexOf(e) = clbSeries.ItemIndex) and not FUpdating then
+  begin
+    FUpdating := True;
+    try
+      fseSOffset.Value := AOffset * 100;
+    finally
+      FUpdating := False;
+    end;
+  end;
+end;
+
+procedure TfrmChart.chMainMouseDown(Sender: TObject; Button: TMouseButton;
+  Shift: TShiftState; X, Y: Integer);
+begin
+  // Only reached outside the plot area: the zoom/pan tools take clicks inside it
+  if Button <> mbLeft then
+    Exit;
+  FDragEntry := AxisEntryAt(X, Y);
+  FDragShared := (FDragEntry = nil) and SharedAxisAt(X, Y);
+  FDragY0 := Y;
+  if Assigned(FDragEntry) then
+  begin
+    FDragOff0 := FDragEntry.OffT.Offset;
+    clbSeries.ItemIndex := FEntries.IndexOf(FDragEntry);
+    LoadSeriesControls;
+  end
+  else if FDragShared then
+    FDragExt0 := chMain.LogicalExtent;
+end;
+
+procedure TfrmChart.chMainMouseMove(Sender: TObject; Shift: TShiftState; X,
+  Y: Integer);
+var
+  h, dg: Double;
+  ext: TDoubleRect;
+begin
+  h := chMain.ClipRect.Bottom - chMain.ClipRect.Top;
+  if Assigned(FDragEntry) and (ssLeft in Shift) and (h > 0) then
+  begin
+    // Dragging down moves the series (and its scale) down
+    dg := (FDragY0 - Y) / h * (chMain.LogicalExtent.b.Y - chMain.LogicalExtent.a.Y);
+    SetEntryOffset(FDragEntry, FDragOff0 + dg);
+    Exit;
+  end;
+  if FDragShared and (ssLeft in Shift) and (h > 0) then
+  begin
+    ext := FDragExt0;
+    dg := (Y - FDragY0) / h * (ext.b.Y - ext.a.Y);
+    ext.a.Y := ext.a.Y + dg;
+    ext.b.Y := ext.b.Y + dg;
+    chMain.LogicalExtent := ext;
+    Exit;
+  end;
+
+  // Hover feedback
+  if (AxisEntryAt(X, Y) <> nil) or SharedAxisAt(X, Y) then
+    chMain.Cursor := crSizeNS
+  else if chkCrosshair.Checked and PtInRect(chMain.ClipRect, Point(X, Y)) then
+    chMain.Cursor := crCross
+  else
+    chMain.Cursor := crDefault;
+
+  // Crosshair
+  if chkCrosshair.Checked then
+  begin
+    FCrossVisible := PtInRect(chMain.ClipRect, Point(X, Y));
+    FCrossPos := Point(X, Y);
+    chMain.Invalidate;
+  end;
+end;
+
+procedure TfrmChart.chMainMouseUp(Sender: TObject; Button: TMouseButton;
+  Shift: TShiftState; X, Y: Integer);
+begin
+  FDragEntry := nil;
+  FDragShared := False;
+end;
+
+procedure TfrmChart.chMainDblClick(Sender: TObject);
+var
+  p: TPoint;
+  e: TChartEntry;
+begin
+  // Double-click a value axis to remove its offset
+  p := chMain.ScreenToClient(Mouse.CursorPos);
+  e := AxisEntryAt(p.X, p.Y);
+  if Assigned(e) then
+    SetEntryOffset(e, 0)
+  else if SharedAxisAt(p.X, p.Y) then
+    chMain.ZoomFull;
+end;
+
+procedure TfrmChart.btnResetOffsetsClick(Sender: TObject);
+var
+  e: TChartEntry;
+begin
+  for e in FEntries do
+    SetEntryOffset(e, 0);
+end;
+
+{ ---------- crosshair ---------- }
+
+procedure TfrmChart.chkCrosshairChange(Sender: TObject);
+begin
+  FCrossVisible := False;
+  chMain.Invalidate;
+end;
+
+procedure TfrmChart.chMainMouseLeave(Sender: TObject);
+begin
+  if FCrossVisible then
+  begin
+    FCrossVisible := False;
+    chMain.Invalidate;
+  end;
+end;
+
+function TfrmChart.NearestIndex(ASeries: TLineSeries; AX: Double): Integer;
+var
+  lo, hi, mid: Integer;
+begin
+  // Points are added in time order, so a binary search is enough
+  Result := -1;
+  if ASeries.Count = 0 then
+    Exit;
+  lo := 0;
+  hi := ASeries.Count - 1;
+  while hi - lo > 1 do
+  begin
+    mid := (lo + hi) div 2;
+    if ASeries.XValue[mid] < AX then
+      lo := mid
+    else
+      hi := mid;
+  end;
+  if Abs(ASeries.XValue[hi] - AX) < Abs(ASeries.XValue[lo] - AX) then
+    Result := hi
+  else
+    Result := lo;
+end;
+
+function TfrmChart.ValueToImageY(e: TChartEntry; AValue: Double): Integer;
+begin
+  if chkSeparateAxes.Checked then
+    Result := chMain.YGraphToImage(e.Trans.AxisToGraph(AValue))
+  else
+    Result := chMain.YGraphToImage(AValue);
+end;
+
+procedure TfrmChart.chMainAfterPaint(ASender: TChart);
+var
+  c: TCanvas;
+  r: TRect;
+  t: TDateTime;
+  e: TChartEntry;
+  idx, i, w, lh, bx, by, px, py: Integer;
+  lines: array of string;
+  colors: array of TColor;
+begin
+  if not (chkCrosshair.Checked and FCrossVisible) then
+    Exit;
+  c := chMain.Canvas;
+  r := chMain.ClipRect;
+  if not PtInRect(r, FCrossPos) then
+    Exit;
+
+  // Cross lines
+  c.Pen.Color := clGray;
+  c.Pen.Style := psDot;
+  c.Pen.Width := 1;
+  c.Line(FCrossPos.X, r.Top, FCrossPos.X, r.Bottom);
+  c.Line(r.Left, FCrossPos.Y, r.Right, FCrossPos.Y);
+  c.Pen.Style := psSolid;
+
+  // Values of every visible series at the nearest sample to the cursor time
+  t := chMain.XImageToGraph(FCrossPos.X);
+  SetLength(lines, 1);
+  SetLength(colors, 1);
+  lines[0] := FormatDateTime('hh:nn:ss.zzz', t);
+  colors[0] := clBlack;
+  for e in FEntries do
+  begin
+    if not e.Series.Active then
+      Continue;
+    idx := NearestIndex(e.Series, t);
+    SetLength(lines, Length(lines) + 1);
+    SetLength(colors, Length(colors) + 1);
+    colors[High(colors)] := e.Series.SeriesColor;
+    if idx < 0 then
+    begin
+      lines[High(lines)] := e.Name + ': ---';
+      Continue;
+    end;
+    lines[High(lines)] := e.Name + ': ' +
+      FloatToStrF(e.Series.YValue[idx], ffGeneral, 7, 0);
+    // marker on the sample
+    px := chMain.XGraphToImage(e.Series.XValue[idx]);
+    py := ValueToImageY(e, e.Series.YValue[idx]);
+    if PtInRect(r, Point(px, py)) then
+    begin
+      c.Brush.Style := bsSolid;
+      c.Brush.Color := e.Series.SeriesColor;
+      c.Pen.Color := clWhite;
+      c.Ellipse(px - 4, py - 4, px + 5, py + 5);
+    end;
+  end;
+
+  // Readout box next to the cursor, kept inside the plot area
+  c.Font := chMain.Font;
+  c.Font.Size := 9;
+  lh := c.TextHeight('Ag') + 2;
+  w := 0;
+  for i := 0 to High(lines) do
+    w := Max(w, c.TextWidth(lines[i]));
+  w := w + 16;
+  bx := FCrossPos.X + 12;
+  by := FCrossPos.Y + 12;
+  if bx + w > r.Right then
+    bx := FCrossPos.X - 12 - w;
+  if by + Length(lines) * lh + 8 > r.Bottom then
+    by := FCrossPos.Y - 12 - Length(lines) * lh - 8;
+  c.Brush.Style := bsSolid;
+  c.Brush.Color := clInfoBk;
+  c.Pen.Color := clGray;
+  c.Rectangle(bx, by, bx + w, by + Length(lines) * lh + 8);
+  c.Brush.Style := bsClear;
+  for i := 0 to High(lines) do
+  begin
+    c.Font.Color := colors[i];
+    if i = 0 then
+      c.Font.Style := [fsBold]
+    else
+      c.Font.Style := [];
+    c.TextOut(bx + 8, by + 4 + i * lh, lines[i]);
+  end;
+end;
+
 procedure TfrmChart.ChartSettingChange(Sender: TObject);
 begin
   // FTimeSource is nil while the form is still streaming
@@ -617,6 +914,7 @@ begin
   chkPoints.Enabled := has;
   // per-series range only matters when each series has its own axis
   chkSAuto.Enabled := has and chkSeparateAxes.Checked;
+  fseSOffset.Enabled := chkSAuto.Enabled;
   fseSMin.Enabled := chkSAuto.Enabled and not chkSAuto.Checked;
   fseSMax.Enabled := fseSMin.Enabled;
   if not has then
@@ -637,6 +935,7 @@ begin
     chkSAuto.Checked := e.AutoScale;
     fseSMin.Value := e.YMin;
     fseSMax.Value := e.YMax;
+    fseSOffset.Value := e.OffT.Offset * 100;
     fseSMin.Enabled := chkSAuto.Enabled and not e.AutoScale;
     fseSMax.Enabled := fseSMin.Enabled;
   finally
@@ -658,6 +957,7 @@ begin
   FEntries[i].AutoScale := chkSAuto.Checked;
   FEntries[i].YMin := fseSMin.Value;
   FEntries[i].YMax := fseSMax.Value;
+  FEntries[i].OffT.Offset := fseSOffset.Value / 100;
   fseSMin.Enabled := chkSAuto.Enabled and not chkSAuto.Checked;
   fseSMax.Enabled := fseSMin.Enabled;
   ApplyAxes;
@@ -723,6 +1023,7 @@ begin
   ini.WriteFloat(SEC, 'YMax', fseYMax.Value);
   ini.WriteBool(SEC, 'SeparateAxes', chkSeparateAxes.Checked);
   ini.WriteInteger(SEC, 'ZoomMode', cbZoomMode.ItemIndex);
+  ini.WriteBool(SEC, 'Crosshair', chkCrosshair.Checked);
 
   ini.WriteInteger(SEC, 'Count', FEntries.Count);
   for i := 0 to FEntries.Count - 1 do
@@ -739,6 +1040,7 @@ begin
     ini.WriteBool(SEC, k + '.AutoScale', e.AutoScale);
     ini.WriteFloat(SEC, k + '.YMin', e.YMin);
     ini.WriteFloat(SEC, k + '.YMax', e.YMax);
+    ini.WriteFloat(SEC, k + '.Offset', e.OffT.Offset);
   end;
 end;
 
@@ -769,6 +1071,7 @@ begin
     fseYMax.Value := ini.ReadFloat(SEC, 'YMax', fseYMax.Value);
     chkSeparateAxes.Checked := ini.ReadBool(SEC, 'SeparateAxes', chkSeparateAxes.Checked);
     cbZoomMode.ItemIndex := ini.ReadInteger(SEC, 'ZoomMode', cbZoomMode.ItemIndex);
+    chkCrosshair.Checked := ini.ReadBool(SEC, 'Crosshair', chkCrosshair.Checked);
     if cbZoomMode.ItemIndex < 0 then
       cbZoomMode.ItemIndex := 0;
 
@@ -794,6 +1097,7 @@ begin
       e.AutoScale := ini.ReadBool(SEC, k + '.AutoScale', True);
       e.YMin := ini.ReadFloat(SEC, k + '.YMin', 0);
       e.YMax := ini.ReadFloat(SEC, k + '.YMax', 100);
+      e.OffT.Offset := ini.ReadFloat(SEC, k + '.Offset', 0);
       clbSeries.Checked[j] := e.Series.Active;
     end;
   finally
