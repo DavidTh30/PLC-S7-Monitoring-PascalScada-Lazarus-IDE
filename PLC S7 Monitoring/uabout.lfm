@@ -1,0 +1,84 @@
+object frmAbout: TfrmAbout
+  Left = 400
+  Height = 330
+  Top = 250
+  Width = 440
+  BorderIcons = [biSystemMenu]
+  BorderStyle = bsDialog
+  Caption = 'About'
+  ClientHeight = 330
+  ClientWidth = 440
+  OnCreate = FormCreate
+  Position = poOwnerFormCenter
+  object pnlHeader: TPanel
+    Left = 0
+    Height = 64
+    Top = 0
+    Width = 440
+    Align = alTop
+    BevelOuter = bvNone
+    ClientHeight = 64
+    ClientWidth = 440
+    Color = $00805020
+    ParentColor = False
+    ParentBackground = False
+    TabOrder = 1
+    object lblTitle: TLabel
+      Left = 16
+      Height = 21
+      Top = 10
+      Width = 400
+      AutoSize = False
+      Caption = 'Siemens S7 PLC Online Monitor'
+      Font.Color = clWhite
+      Font.Height = -16
+      Font.Style = [fsBold]
+      ParentFont = False
+    end
+    object lblVersion: TLabel
+      Left = 16
+      Height = 15
+      Top = 38
+      Width = 400
+      AutoSize = False
+      Caption = 'Version'
+      Font.Color = clWhite
+      ParentFont = False
+    end
+  end
+  object lblDescription: TLabel
+    Left = 16
+    Height = 48
+    Top = 78
+    Width = 408
+    AutoSize = False
+    Caption = 'Description'
+    WordWrap = True
+  end
+  object bvlLine: TBevel
+    Left = 16
+    Height = 2
+    Top = 134
+    Width = 408
+    Shape = bsTopLine
+  end
+  object lblBuilt: TLabel
+    Left = 16
+    Height = 120
+    Top = 144
+    Width = 408
+    AutoSize = False
+    Caption = 'Built with'
+  end
+  object btnOK: TButton
+    Left = 344
+    Height = 30
+    Top = 286
+    Width = 80
+    Cancel = True
+    Caption = 'OK'
+    Default = True
+    ModalResult = 1
+    TabOrder = 0
+  end
+end

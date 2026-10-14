@@ -1,0 +1,635 @@
+object frmMain: TfrmMain
+  Left = 200
+  Height = 720
+  Top = 100
+  Width = 1180
+  Caption = 'Siemens S7 PLC Online Monitor  (PascalSCADA)'
+  ClientHeight = 720
+  ClientWidth = 1180
+  Constraints.MinHeight = 560
+  Constraints.MinWidth = 900
+  Menu = mnuMain
+  OnCloseQuery = FormCloseQuery
+  OnCreate = FormCreate
+  OnDestroy = FormDestroy
+  Position = poScreenCenter
+  object sbMain: TStatusBar
+    Left = 0
+    Height = 23
+    Top = 697
+    Width = 1180
+    Panels = <
+      item
+        Width = 400
+      end
+      item
+        Width = 200
+      end>
+    SimplePanel = False
+  end
+  object pnlLog: TPanel
+    Left = 0
+    Height = 150
+    Top = 547
+    Width = 1180
+    Align = alBottom
+    BevelOuter = bvNone
+    ClientHeight = 150
+    ClientWidth = 1180
+    TabOrder = 1
+    object pnlLogHeader: TPanel
+      Left = 0
+      Height = 28
+      Top = 0
+      Width = 1180
+      Align = alTop
+      Alignment = taLeftJustify
+      BevelOuter = bvNone
+      BorderSpacing.Left = 6
+      Caption = 'Event log'
+      ClientHeight = 28
+      ClientWidth = 1180
+      Font.Style = [fsBold]
+      ParentFont = False
+      TabOrder = 0
+      object btnClearLog: TButton
+        Left = 1094
+        Height = 24
+        Top = 2
+        Width = 80
+        Anchors = [akTop, akRight]
+        Caption = 'Clear log'
+        Font.Style = []
+        OnClick = btnClearLogClick
+        ParentFont = False
+        TabOrder = 0
+      end
+    end
+    object memLog: TMemo
+      Left = 0
+      Height = 122
+      Top = 28
+      Width = 1180
+      Align = alClient
+      Font.Name = 'Consolas'
+      Font.Height = -12
+      ParentFont = False
+      ReadOnly = True
+      ScrollBars = ssAutoBoth
+      TabOrder = 1
+      WordWrap = False
+    end
+  end
+  object splLog: TSplitter
+    Cursor = crVSplit
+    Left = 0
+    Height = 5
+    Top = 542
+    Width = 1180
+    Align = alBottom
+    ResizeAnchor = akBottom
+  end
+  object pnlLeft: TPanel
+    Left = 0
+    Height = 542
+    Top = 0
+    Width = 300
+    Align = alLeft
+    BevelOuter = bvNone
+    ClientHeight = 542
+    ClientWidth = 300
+    TabOrder = 0
+    object gbNetwork: TGroupBox
+      Left = 4
+      Height = 344
+      Top = 4
+      Width = 292
+      Align = alTop
+      BorderSpacing.Around = 4
+      Caption = 'Network Configuration'
+      ClientHeight = 324
+      ClientWidth = 288
+      TabOrder = 0
+      object lblIP: TLabel
+        Left = 12
+        Height = 15
+        Top = 10
+        Width = 80
+        Caption = 'PLC IP address'
+      end
+      object edtIP: TEdit
+        Left = 130
+        Height = 23
+        Top = 6
+        Width = 148
+        TabOrder = 0
+        Text = '192.168.0.1'
+      end
+      object lblPort: TLabel
+        Left = 12
+        Height = 15
+        Top = 42
+        Width = 60
+        Caption = 'TCP port'
+      end
+      object edtPort: TSpinEdit
+        Left = 130
+        Height = 23
+        Top = 38
+        Width = 148
+        MaxValue = 65535
+        MinValue = 1
+        TabOrder = 1
+        Value = 102
+      end
+      object lblCPU: TLabel
+        Left = 12
+        Height = 15
+        Top = 74
+        Width = 60
+        Caption = 'CPU type'
+      end
+      object cbCPU: TComboBox
+        Left = 130
+        Height = 23
+        Top = 70
+        Width = 148
+        ItemHeight = 15
+        ItemIndex = 2
+        Items.Strings = (
+          'S7-300'
+          'S7-400'
+          'S7-1200'
+          'S7-1500'
+          'Custom rack/slot'
+        )
+        OnChange = cbCPUChange
+        Style = csDropDownList
+        TabOrder = 2
+        Text = 'S7-1200'
+      end
+      object lblRack: TLabel
+        Left = 12
+        Height = 15
+        Top = 106
+        Width = 30
+        Caption = 'Rack'
+      end
+      object edtRack: TSpinEdit
+        Left = 130
+        Height = 23
+        Top = 102
+        Width = 148
+        Enabled = False
+        MaxValue = 7
+        TabOrder = 3
+      end
+      object lblSlot: TLabel
+        Left = 12
+        Height = 15
+        Top = 138
+        Width = 30
+        Caption = 'Slot'
+      end
+      object edtSlot: TSpinEdit
+        Left = 130
+        Height = 23
+        Top = 134
+        Width = 148
+        Enabled = False
+        MaxValue = 31
+        TabOrder = 4
+        Value = 1
+      end
+      object lblTimeout: TLabel
+        Left = 12
+        Height = 15
+        Top = 170
+        Width = 80
+        Caption = 'Timeout (ms)'
+      end
+      object edtTimeout: TSpinEdit
+        Left = 130
+        Height = 23
+        Top = 166
+        Width = 148
+        Increment = 100
+        MaxValue = 30000
+        MinValue = 100
+        TabOrder = 5
+        Value = 1000
+      end
+      object lblScan: TLabel
+        Left = 12
+        Height = 15
+        Top = 202
+        Width = 80
+        Caption = 'Scan rate (ms)'
+      end
+      object edtScan: TSpinEdit
+        Left = 130
+        Height = 23
+        Top = 198
+        Width = 148
+        Increment = 50
+        MaxValue = 60000
+        MinValue = 50
+        TabOrder = 6
+        Value = 500
+      end
+      object chkAutoReconnect: TCheckBox
+        Left = 12
+        Height = 19
+        Top = 232
+        Width = 150
+        Caption = 'Auto reconnect'
+        Checked = True
+        State = cbChecked
+        TabOrder = 7
+      end
+      object btnConnect: TButton
+        Left = 12
+        Height = 32
+        Top = 262
+        Width = 128
+        Caption = 'Connect'
+        Default = True
+        OnClick = btnConnectClick
+        TabOrder = 8
+      end
+      object btnDisconnect: TButton
+        Left = 150
+        Height = 32
+        Top = 262
+        Width = 128
+        Caption = 'Disconnect'
+        Enabled = False
+        OnClick = btnDisconnectClick
+        TabOrder = 9
+      end
+      object shpStatus: TShape
+        Left = 12
+        Height = 18
+        Top = 306
+        Width = 18
+        Brush.Color = clGray
+        Shape = stCircle
+      end
+      object lblStatus: TLabel
+        Left = 38
+        Height = 15
+        Top = 307
+        Width = 240
+        AutoSize = False
+        Caption = 'Disconnected'
+        Font.Style = [fsBold]
+        ParentFont = False
+      end
+    end
+    object gbStats: TGroupBox
+      Left = 4
+      Height = 126
+      Top = 412
+      Width = 292
+      Align = alClient
+      BorderSpacing.Around = 4
+      Caption = 'Communication'
+      ClientHeight = 106
+      ClientWidth = 288
+      TabOrder = 1
+      object lblStats: TLabel
+        Left = 12
+        Height = 60
+        Top = 8
+        Width = 264
+        AutoSize = False
+        Caption = 'Not connected'
+        WordWrap = True
+      end
+    end
+  end
+  object splLeft: TSplitter
+    Left = 300
+    Height = 542
+    Top = 0
+    Width = 5
+  end
+  object pnlMain: TPanel
+    Left = 305
+    Height = 542
+    Top = 0
+    Width = 875
+    Align = alClient
+    BevelOuter = bvNone
+    ClientHeight = 542
+    ClientWidth = 875
+    TabOrder = 2
+    object gbTagEdit: TGroupBox
+      Left = 4
+      Height = 118
+      Top = 4
+      Width = 867
+      Align = alTop
+      BorderSpacing.Around = 4
+      Caption = 'Tag Configuration'
+      ClientHeight = 98
+      ClientWidth = 863
+      TabOrder = 0
+      object lblTagName: TLabel
+        Left = 12
+        Height = 15
+        Top = 4
+        Width = 60
+        Caption = 'Tag name'
+      end
+      object lblArea: TLabel
+        Left = 180
+        Height = 15
+        Top = 4
+        Width = 30
+        Caption = 'Area'
+      end
+      object lblDB: TLabel
+        Left = 268
+        Height = 15
+        Top = 4
+        Width = 40
+        Caption = 'DB no.'
+      end
+      object lblByte: TLabel
+        Left = 348
+        Height = 15
+        Top = 4
+        Width = 40
+        Caption = 'Byte'
+      end
+      object lblBit: TLabel
+        Left = 428
+        Height = 15
+        Top = 4
+        Width = 30
+        Caption = 'Bit'
+      end
+      object lblType: TLabel
+        Left = 496
+        Height = 15
+        Top = 4
+        Width = 50
+        Caption = 'Data type'
+      end
+      object edtTagName: TEdit
+        Left = 12
+        Height = 23
+        Top = 22
+        Width = 160
+        TabOrder = 0
+        TextHint = 'e.g. Motor1_Speed'
+      end
+      object cbArea: TComboBox
+        Left = 180
+        Height = 23
+        Top = 22
+        Width = 80
+        ItemHeight = 15
+        ItemIndex = 3
+        Items.Strings = (
+          'I (Input)'
+          'Q (Output)'
+          'M (Memory)'
+          'DB'
+        )
+        OnChange = cbAreaChange
+        Style = csDropDownList
+        TabOrder = 1
+        Text = 'DB'
+      end
+      object edtDB: TSpinEdit
+        Left = 268
+        Height = 23
+        Top = 22
+        Width = 72
+        MaxValue = 65535
+        MinValue = 1
+        TabOrder = 2
+        Value = 1
+      end
+      object edtByte: TSpinEdit
+        Left = 348
+        Height = 23
+        Top = 22
+        Width = 72
+        MaxValue = 65535
+        TabOrder = 3
+      end
+      object edtBit: TSpinEdit
+        Left = 428
+        Height = 23
+        Top = 22
+        Width = 60
+        MaxValue = 7
+        TabOrder = 4
+      end
+      object cbType: TComboBox
+        Left = 496
+        Height = 23
+        Top = 22
+        Width = 90
+        ItemHeight = 15
+        OnChange = cbTypeChange
+        Style = csDropDownList
+        TabOrder = 5
+      end
+      object btnAddTag: TButton
+        Left = 600
+        Height = 28
+        Top = 19
+        Width = 90
+        Caption = 'Add tag'
+        OnClick = btnAddTagClick
+        TabOrder = 6
+      end
+      object btnRemoveTag: TButton
+        Left = 696
+        Height = 28
+        Top = 19
+        Width = 90
+        Caption = 'Remove'
+        OnClick = btnRemoveTagClick
+        TabOrder = 7
+      end
+      object btnClearTags: TButton
+        Left = 792
+        Height = 28
+        Top = 19
+        Width = 64
+        Caption = 'Clear all'
+        OnClick = btnClearTagsClick
+        TabOrder = 8
+      end
+      object lblWrite: TLabel
+        Left = 12
+        Height = 15
+        Top = 64
+        Width = 160
+        AutoSize = False
+        Caption = 'Write value:'
+      end
+      object edtWriteValue: TEdit
+        Left = 180
+        Height = 23
+        Top = 60
+        Width = 160
+        TabOrder = 9
+        TextHint = 'number, TRUE / FALSE'
+      end
+      object btnWrite: TButton
+        Left = 348
+        Height = 28
+        Top = 57
+        Width = 90
+        Caption = 'Write'
+        OnClick = btnWriteClick
+        TabOrder = 10
+      end
+      object btnToggle: TButton
+        Left = 446
+        Height = 28
+        Top = 57
+        Width = 90
+        Caption = 'Toggle bit'
+        Enabled = False
+        OnClick = btnToggleClick
+        TabOrder = 11
+      end
+    end
+    object gbTags: TGroupBox
+      Left = 4
+      Height = 412
+      Top = 126
+      Width = 867
+      Align = alClient
+      BorderSpacing.Around = 4
+      Caption = 'Online Tags'
+      ClientHeight = 392
+      ClientWidth = 863
+      TabOrder = 1
+      object sgTags: TStringGrid
+        Left = 0
+        Height = 392
+        Top = 0
+        Width = 863
+        Align = alClient
+        ColCount = 8
+        FixedCols = 0
+        Options = [goFixedVertLine, goFixedHorzLine, goVertLine, goHorzLine, goColSizing, goRowSelect, goSmoothScroll]
+        RowCount = 1
+        TabOrder = 0
+        OnMouseDown = sgTagsMouseDown
+        OnMouseMove = sgTagsMouseMove
+        OnSelection = sgTagsSelection
+      end
+    end
+  end
+  object mnuMain: TMainMenu
+    Left = 700
+    Top = 300
+    object miFile: TMenuItem
+      Caption = '&File'
+      object miOpen: TMenuItem
+        Caption = '&Open...'
+        ShortCut = 16463
+        OnClick = miOpenClick
+      end
+      object miSave: TMenuItem
+        Caption = '&Save'
+        ShortCut = 16467
+        OnClick = miSaveClick
+      end
+      object miSaveAs: TMenuItem
+        Caption = 'Save &As...'
+        ShortCut = 24659
+        OnClick = miSaveAsClick
+      end
+      object miSepFile: TMenuItem
+        Caption = '-'
+      end
+      object miExit: TMenuItem
+        Caption = 'E&xit'
+        OnClick = miExitClick
+      end
+    end
+    object miNetwork: TMenuItem
+      Caption = '&Network'
+      object miConnect: TMenuItem
+        Caption = '&Connect'
+        ShortCut = 116
+        OnClick = btnConnectClick
+      end
+      object miDisconnect: TMenuItem
+        Caption = '&Disconnect'
+        Enabled = False
+        ShortCut = 8308
+        OnClick = btnDisconnectClick
+      end
+      object miSepNetwork: TMenuItem
+        Caption = '-'
+      end
+      object miShowNetPanel: TMenuItem
+        Caption = 'Show network &panel'
+        Checked = True
+        OnClick = miShowNetPanelClick
+      end
+    end
+    object miChart: TMenuItem
+      Caption = '&Chart'
+      object miShowChart: TMenuItem
+        Caption = '&Show chart window'
+        ShortCut = 16468
+        OnClick = miShowChartClick
+      end
+      object miAddToChart: TMenuItem
+        Caption = '&Add selected tag to chart'
+        ShortCut = 16452
+        OnClick = miAddToChartClick
+      end
+      object miExportChart: TMenuItem
+        Caption = '&Export chart data to CSV...'
+        OnClick = miExportChartClick
+      end
+      object miSepChart: TMenuItem
+        Caption = '-'
+      end
+      object miClearChart: TMenuItem
+        Caption = '&Clear chart data'
+        OnClick = miClearChartClick
+      end
+    end
+    object miHelp: TMenuItem
+      Caption = '&Help'
+      object miAbout: TMenuItem
+        Caption = '&About...'
+        OnClick = miAboutClick
+      end
+    end
+  end
+  object tmrRefresh: TTimer
+    Enabled = False
+    Interval = 250
+    OnTimer = tmrRefreshTimer
+    Left = 760
+    Top = 300
+  end
+  object dlgOpen: TOpenDialog
+    DefaultExt = '.ini'
+    Filter = 'Monitor config (*.ini)|*.ini|All files (*.*)|*.*'
+    Left = 820
+    Top = 300
+  end
+  object dlgSave: TSaveDialog
+    DefaultExt = '.ini'
+    Filter = 'Monitor config (*.ini)|*.ini|All files (*.*)|*.*'
+    Options = [ofOverwritePrompt, ofEnableSizing, ofViewDetail]
+    Left = 880
+    Top = 300
+  end
+end
