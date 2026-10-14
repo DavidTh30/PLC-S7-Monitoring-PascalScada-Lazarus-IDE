@@ -13,7 +13,7 @@ interface
 uses
   Classes, SysUtils, IniFiles, fgl, Forms, Controls, Graphics, Dialogs, StdCtrls,
   ExtCtrls, ComCtrls, CheckLst, Spin, TAGraph, TASeries, TAIntervalSources,
-  TAChartUtils, TALegend, TATypes,
+  TAChartUtils, TALegend, TATypes, TATextElements, TACustomSource, TAChartAxis, TAChartAxisUtils, TATransformations, TATools,
   tag, plctag, plcnumber;
 
 type
@@ -27,6 +27,14 @@ type
     ValueTag: TPLCNumber;
     StatusTag: TPLCTag;
     Series: TLineSeries;
+    // Own value axis, used when "separate axes" is on. The transformations
+    // map the series range onto the shared 0..1 graph range.
+    Axis: TChartAxis;
+    Trans: TChartAxisTransformations;
+    AutoT: TAutoScaleAxisTransform;
+    LinT: TLinearAxisTransform;
+    AutoScale: Boolean;
+    YMin, YMax: Double;
   end;
 
   TChartEntryList = specialize TFPGObjectList<TChartEntry>;
@@ -38,10 +46,20 @@ type
     btnExport: TButton;
     btnPause: TButton;
     btnRemove: TButton;
+    btnResetZoom: TButton;
     btnSettings: TButton;
     cbLegendPos: TComboBox;
     cbLineStyle: TComboBox;
     cbTimeFormat: TComboBox;
+    cbZoomMode: TComboBox;
+    chkSAuto: TCheckBox;
+    chkSeparateAxes: TCheckBox;
+    fseSMax: TFloatSpinEdit;
+    fseSMin: TFloatSpinEdit;
+    lblSMax: TLabel;
+    lblSMin: TLabel;
+    lblZoom: TLabel;
+    lblZoomState: TLabel;
     cbtnBack: TColorButton;
     cbtnGrid: TColorButton;
     cbtnPlot: TColorButton;
@@ -95,7 +113,9 @@ type
     procedure btnExportClick(Sender: TObject);
     procedure btnPauseClick(Sender: TObject);
     procedure btnRemoveClick(Sender: TObject);
+    procedure btnResetZoomClick(Sender: TObject);
     procedure btnSettingsClick(Sender: TObject);
+    procedure cbZoomModeChange(Sender: TObject);
     procedure chkOnTopChange(Sender: TObject);
     procedure clbSeriesClickCheck(Sender: TObject);
     procedure clbSeriesSelectionChange(Sender: TObject; User: Boolean);
@@ -115,6 +135,13 @@ type
     FPaused: Boolean;
     FUpdating: Boolean;
     FOnQueryDrop: TChartTagQuery;
+    FToolset: TChartToolset;
+    FZoomDrag: TZoomDragTool;
+    FPanDrag: TPanDragTool;
+    FZoomWheel: TZoomMouseWheelTool;
+    procedure CreateTools;
+    procedure ApplyZoomMode;
+    procedure ApplyAxes;
     function IndexOfTag(AValueTag: TPLCNumber): Integer;
     function IndexOfName(const AName: string): Integer;
     procedure DeleteEntry(AIndex: Integer);
@@ -175,11 +202,17 @@ begin
   FEntries := TChartEntryList.Create(True);
 
   FTimeSource := TDateTimeIntervalChartSource.Create(Self);
+  FTimeSource.Params.MinLength := 70; // pixels between time labels
+  FTimeSource.Params.Options := FTimeSource.Params.Options + [aipUseMinLength];
   chMain.BottomAxis.Marks.Source := FTimeSource;
+  chMain.BottomAxis.Marks.OverlapPolicy := opHideNeighbour;
   chMain.BottomAxis.Marks.Style := smsLabel;
   chMain.BottomAxis.Title.Visible := True;
   chMain.LeftAxis.Title.Visible := True;
   chMain.LeftAxis.Title.LabelFont.Orientation := 900;
+
+  CreateTools;
+  ApplyZoomMode;
 
   tmrSample.Interval := edtSample.Value;
   SetSettingsVisible(False);
@@ -246,10 +279,31 @@ begin
   e.Series.Pointer.Style := psCircle;
   e.Series.Pointer.HorizSize := 3;
   e.Series.Pointer.VertSize := 3;
+  e.AutoScale := True;
+  e.YMin := 0;
+  e.YMax := 100;
+
+  e.Trans := TChartAxisTransformations.Create(Self);
+  e.AutoT := TAutoScaleAxisTransform.Create(e.Trans);
+  e.AutoT.Transformations := e.Trans;
+  e.LinT := TLinearAxisTransform.Create(e.Trans);
+  e.LinT.Transformations := e.Trans;
+  e.LinT.Enabled := False;
+
+  e.Axis := chMain.AxisList.Add;
+  e.Axis.Alignment := calLeft;
+  e.Axis.Transformations := e.Trans;
+  e.Axis.Title.Caption := AName;
+  e.Axis.Title.Visible := True;
+  e.Axis.Title.LabelFont.Orientation := 900;
+  e.Axis.Title.LabelFont.Style := [fsBold];
+  e.Axis.Grid.Visible := False;
+
   ApplySeriesStyle(e, SeriesColors[FEntries.Count mod Length(SeriesColors)], 2,
     psSolid, AIsBool, False);
   chMain.AddSeries(e.Series);
   FEntries.Add(e);
+  ApplyAxes;
 
   i := clbSeries.Items.Add(AName);
   clbSeries.Checked[i] := True;
@@ -262,10 +316,19 @@ end;
 
 procedure TfrmChart.DeleteEntry(AIndex: Integer);
 begin
-  FEntries[AIndex].Series.Free; // removes itself from the chart
+  with FEntries[AIndex] do
+  begin
+    Series.Free; // removes itself from the chart
+    Axis.Free;   // removes itself from AxisList (shifts later axis indexes)
+    Trans.Free;  // also frees its transforms
+  end;
   FEntries.Delete(AIndex);
   clbSeries.Items.Delete(AIndex);
-  LoadSeriesControls;
+  if not (csDestroying in ComponentState) then
+  begin
+    ApplyAxes; // re-links AxisIndexY after the index shift
+    LoadSeriesControls;
+  end;
 end;
 
 procedure TfrmChart.RemoveTag(AValueTag: TPLCNumber);
@@ -310,6 +373,15 @@ var
   t, oldest: TDateTime;
   e: TChartEntry;
 begin
+  // While zoomed the view stays where the user put it; Reset zoom returns to live
+  btnResetZoom.Enabled := chMain.IsZoomed;
+  if chMain.IsZoomed then
+    lblZoomState.Caption := 'Zoomed - live view held'
+  else if FPaused then
+    lblZoomState.Caption := 'Paused'
+  else
+    lblZoomState.Caption := 'Live';
+
   if FPaused then
     Exit;
   t := Now;
@@ -363,10 +435,12 @@ begin
   chMain.LeftAxis.Title.Caption := edtYTitle.Text;
   chMain.LeftAxis.Title.Visible := edtYTitle.Text <> '';
 
-  fseYMin.Enabled := not chkYAuto.Checked;
-  fseYMax.Enabled := not chkYAuto.Checked;
+  // Shared value axis range (only used when the axes are not separated)
+  chkYAuto.Enabled := not chkSeparateAxes.Checked;
+  fseYMin.Enabled := chkYAuto.Enabled and not chkYAuto.Checked;
+  fseYMax.Enabled := fseYMin.Enabled;
   with chMain.LeftAxis.Range do
-    if chkYAuto.Checked or (fseYMax.Value <= fseYMin.Value) then
+    if chkSeparateAxes.Checked or chkYAuto.Checked or (fseYMax.Value <= fseYMin.Value) then
     begin
       UseMin := False;
       UseMax := False;
@@ -379,7 +453,123 @@ begin
       UseMax := True;
     end;
 
+  ApplyAxes;
   UpdateAxisRange;
+end;
+
+procedure TfrmChart.ApplyAxes;
+var
+  sep, gridDone: Boolean;
+  e: TChartEntry;
+begin
+  sep := chkSeparateAxes.Checked;
+  chMain.LeftAxis.Visible := not sep or (FEntries.Count = 0);
+  chMain.LeftAxis.Grid.Visible := chkShowGrid.Checked and chMain.LeftAxis.Visible;
+
+  // In separate mode every series is mapped onto 0..1, so pin the vertical
+  // extent there; each axis then shows exactly its own range.
+  chMain.Extent.YMin := 0;
+  chMain.Extent.YMax := 1;
+  chMain.Extent.UseYMin := sep;
+  chMain.Extent.UseYMax := sep;
+
+  gridDone := False;
+  for e in FEntries do
+  begin
+    if sep then
+      e.Series.AxisIndexY := e.Axis.Index
+    else
+      e.Series.AxisIndexY := chMain.LeftAxis.Index;
+
+    e.Axis.Visible := sep and e.Series.Active;
+    e.Axis.Title.Caption := e.Name;
+    e.Axis.Title.LabelFont.Color := e.Series.SeriesColor;
+    e.Axis.Marks.LabelFont.Color := e.Series.SeriesColor;
+    e.Axis.AxisPen.Color := e.Series.SeriesColor;
+    e.Axis.AxisPen.Visible := True;
+    // One grid is enough; take it from the first visible axis
+    e.Axis.Grid.Visible := chkShowGrid.Checked and e.Axis.Visible and not gridDone;
+    e.Axis.Grid.Color := cbtnGrid.ButtonColor;
+    if e.Axis.Visible then
+      gridDone := True;
+
+    if e.AutoScale or (e.YMax <= e.YMin) then
+    begin
+      e.AutoT.Enabled := True;
+      e.LinT.Enabled := False;
+    end
+    else
+    begin
+      // value -> (value - min) / (max - min)
+      e.LinT.Scale := 1 / (e.YMax - e.YMin);
+      e.LinT.Offset := -e.YMin / (e.YMax - e.YMin);
+      e.LinT.Enabled := True;
+      e.AutoT.Enabled := False;
+    end;
+  end;
+end;
+
+{ ---------- zoom & pan ---------- }
+
+procedure TfrmChart.CreateTools;
+begin
+  FToolset := TChartToolset.Create(Self);
+
+  // Left drag: zoom box. Dragging right-to-left restores the full view.
+  FZoomDrag := TZoomDragTool.Create(FToolset);
+  FZoomDrag.Toolset := FToolset;
+  FZoomDrag.Shift := [ssLeft];
+  FZoomDrag.Brush.Style := bsClear;
+  FZoomDrag.Frame.Color := clGray;
+  FZoomDrag.Frame.Style := psDash;
+
+  // Right drag: pan
+  FPanDrag := TPanDragTool.Create(FToolset);
+  FPanDrag.Toolset := FToolset;
+  FPanDrag.Shift := [ssRight];
+
+  // Mouse wheel: zoom around the cursor
+  FZoomWheel := TZoomMouseWheelTool.Create(FToolset);
+  FZoomWheel.Toolset := FToolset;
+  FZoomWheel.FixedPoint := True;
+
+  chMain.Toolset := FToolset;
+end;
+
+procedure TfrmChart.ApplyZoomMode;
+const
+  WHEEL = 1.2;
+begin
+  case cbZoomMode.ItemIndex of
+    1: begin // time axis only
+         FZoomDrag.RatioLimit := zrlFixedY;
+         FPanDrag.Directions := [pdLeft, pdRight];
+         FZoomWheel.ZoomFactor := WHEEL;
+         FZoomWheel.ZoomRatio := 1 / WHEEL;
+       end;
+    2: begin // value axis only
+         FZoomDrag.RatioLimit := zrlFixedX;
+         FPanDrag.Directions := [pdUp, pdDown];
+         FZoomWheel.ZoomFactor := 1;
+         FZoomWheel.ZoomRatio := WHEEL;
+       end;
+  else     // both axes
+    FZoomDrag.RatioLimit := zrlNone;
+    FPanDrag.Directions := [pdLeft, pdUp, pdRight, pdDown];
+    FZoomWheel.ZoomFactor := WHEEL;
+    FZoomWheel.ZoomRatio := 1;
+  end;
+end;
+
+procedure TfrmChart.cbZoomModeChange(Sender: TObject);
+begin
+  if Assigned(FToolset) then
+    ApplyZoomMode;
+end;
+
+procedure TfrmChart.btnResetZoomClick(Sender: TObject);
+begin
+  chMain.ZoomFull;
 end;
 
 procedure TfrmChart.ChartSettingChange(Sender: TObject);
@@ -425,6 +615,10 @@ begin
   cbLineStyle.Enabled := has;
   chkStep.Enabled := has;
   chkPoints.Enabled := has;
+  // per-series range only matters when each series has its own axis
+  chkSAuto.Enabled := has and chkSeparateAxes.Checked;
+  fseSMin.Enabled := chkSAuto.Enabled and not chkSAuto.Checked;
+  fseSMax.Enabled := fseSMin.Enabled;
   if not has then
   begin
     lblSeriesName.Caption := 'No series selected';
@@ -440,6 +634,11 @@ begin
     cbLineStyle.ItemIndex := StyleIndex(e.Series.LinePen.Style);
     chkStep.Checked := e.Series.LineType = ltStepXY;
     chkPoints.Checked := e.Series.ShowPoints;
+    chkSAuto.Checked := e.AutoScale;
+    fseSMin.Value := e.YMin;
+    fseSMax.Value := e.YMax;
+    fseSMin.Enabled := chkSAuto.Enabled and not e.AutoScale;
+    fseSMax.Enabled := fseSMin.Enabled;
   finally
     FUpdating := False;
   end;
@@ -456,6 +655,12 @@ begin
     Exit;
   ApplySeriesStyle(FEntries[i], cbtnSeries.ButtonColor, seWidth.Value,
     LineStyles[cbLineStyle.ItemIndex], chkStep.Checked, chkPoints.Checked);
+  FEntries[i].AutoScale := chkSAuto.Checked;
+  FEntries[i].YMin := fseSMin.Value;
+  FEntries[i].YMax := fseSMax.Value;
+  fseSMin.Enabled := chkSAuto.Enabled and not chkSAuto.Checked;
+  fseSMax.Enabled := fseSMin.Enabled;
+  ApplyAxes;
 end;
 
 procedure TfrmChart.clbSeriesSelectionChange(Sender: TObject; User: Boolean);
@@ -516,6 +721,8 @@ begin
   ini.WriteBool(SEC, 'YAuto', chkYAuto.Checked);
   ini.WriteFloat(SEC, 'YMin', fseYMin.Value);
   ini.WriteFloat(SEC, 'YMax', fseYMax.Value);
+  ini.WriteBool(SEC, 'SeparateAxes', chkSeparateAxes.Checked);
+  ini.WriteInteger(SEC, 'ZoomMode', cbZoomMode.ItemIndex);
 
   ini.WriteInteger(SEC, 'Count', FEntries.Count);
   for i := 0 to FEntries.Count - 1 do
@@ -529,6 +736,9 @@ begin
     ini.WriteBool(SEC, k + '.Step', e.Series.LineType = ltStepXY);
     ini.WriteBool(SEC, k + '.Points', e.Series.ShowPoints);
     ini.WriteBool(SEC, k + '.Visible', e.Series.Active);
+    ini.WriteBool(SEC, k + '.AutoScale', e.AutoScale);
+    ini.WriteFloat(SEC, k + '.YMin', e.YMin);
+    ini.WriteFloat(SEC, k + '.YMax', e.YMax);
   end;
 end;
 
@@ -557,6 +767,10 @@ begin
     chkYAuto.Checked := ini.ReadBool(SEC, 'YAuto', chkYAuto.Checked);
     fseYMin.Value := ini.ReadFloat(SEC, 'YMin', fseYMin.Value);
     fseYMax.Value := ini.ReadFloat(SEC, 'YMax', fseYMax.Value);
+    chkSeparateAxes.Checked := ini.ReadBool(SEC, 'SeparateAxes', chkSeparateAxes.Checked);
+    cbZoomMode.ItemIndex := ini.ReadInteger(SEC, 'ZoomMode', cbZoomMode.ItemIndex);
+    if cbZoomMode.ItemIndex < 0 then
+      cbZoomMode.ItemIndex := 0;
 
     // Series were attached by the owner; restore their styles by name
     n := ini.ReadInteger(SEC, 'Count', 0);
@@ -577,6 +791,9 @@ begin
         ini.ReadBool(SEC, k + '.Step', e.Series.LineType = ltStepXY),
         ini.ReadBool(SEC, k + '.Points', False));
       e.Series.Active := ini.ReadBool(SEC, k + '.Visible', True);
+      e.AutoScale := ini.ReadBool(SEC, k + '.AutoScale', True);
+      e.YMin := ini.ReadFloat(SEC, k + '.YMin', 0);
+      e.YMax := ini.ReadFloat(SEC, k + '.YMax', 100);
       clbSeries.Checked[j] := e.Series.Active;
     end;
   finally
@@ -585,6 +802,7 @@ begin
   tmrSample.Interval := edtSample.Value;
   chkOnTop.Checked := ini.ReadBool(SEC, 'AlwaysOnTop', chkOnTop.Checked);
   SetSettingsVisible(ini.ReadBool(SEC, 'SettingsVisible', pnlSettings.Visible));
+  ApplyZoomMode;
   ApplyChartSettings;
   LoadSeriesControls;
 end;
@@ -647,6 +865,7 @@ var
 begin
   for i := 0 to FEntries.Count - 1 do
     FEntries[i].Series.Active := clbSeries.Checked[i];
+  ApplyAxes; // hidden series also hide their axis
 end;
 
 { ---------- CSV export ---------- }
