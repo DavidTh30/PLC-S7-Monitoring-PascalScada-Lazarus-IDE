@@ -37,6 +37,14 @@ type
 
   TMonTagList = specialize TFPGObjectList<TMonTag>;
 
+  { ISO-TCP driver that does not busy-wait. With ReadSomethingAlways off the
+    stock scan loop only yields the thread when no tag is due, which spins a
+    CPU core; sleep briefly instead. }
+  TMonS7Driver = class(TISOTCPDriver)
+  protected
+    procedure DoScanRead(Sender: TObject; var NeedSleep: LongInt); override;
+  end;
+
   { TfrmMain }
 
   TfrmMain = class(TForm)
@@ -147,9 +155,14 @@ type
     procedure tmrRefreshTimer(Sender: TObject);
   private
     FPort: TTCP_UDPPort;
-    FDriver: TISOTCPDriver;
+    FDriver: TMonS7Driver;
     FTags: TMonTagList;
     FConnecting: Boolean;
+    FIsOpen: Boolean;       // last reported port state, to log transitions only once
+    // communication statistics (PascalSCADA does not update its per-second counters)
+    FStatTick: QWord;
+    FStatTX, FStatRX, FStatReads: Int64;
+    FTXRate, FRXRate, FReadRate: Int64;
     FChart: TfrmChart;
     FFileName: string;      // current configuration file
     FSavedState: string;    // configuration as last loaded/saved, to detect changes
@@ -171,6 +184,7 @@ type
     procedure PortOpenError(Sender: TObject);
     procedure PortDisconnected(Sender: TObject);
     procedure ApplyNetworkConfig;
+    procedure UpdateStatistics;
     procedure UpdateEditorState;
     procedure SetStatus(AColor: TColor; const AText: string);
     function CreateMonTag(const AName: string; AArea: TS7Area; ADB, AByte,
@@ -235,6 +249,15 @@ begin
   end;
 end;
 
+{ TMonS7Driver }
+
+procedure TMonS7Driver.DoScanRead(Sender: TObject; var NeedSleep: LongInt);
+begin
+  inherited DoScanRead(Sender, NeedSleep);
+  if NeedSleep < 0 then
+    NeedSleep := 5; // ms; small compared to any scan rate
+end;
+
 { TMonTag }
 
 destructor TMonTag.Destroy;
@@ -280,9 +303,11 @@ begin
   FPort.OnCommPortOpenError := @PortOpenError;
   FPort.OnCommPortDisconnected := @PortDisconnected;
 
-  FDriver := TISOTCPDriver.Create(nil);
+  FDriver := TMonS7Driver.Create(nil);
   FDriver.ConnectionWay := ISOTCP;
   FDriver.CommunicationPort := FPort;
+  // The S7 driver defaults to polling continuously; honour each tag's scan rate instead
+  FDriver.ReadSomethingAlways := False;
 
   cbType.Items.Clear;
   for t := Low(TS7DataType) to High(TS7DataType) do
@@ -375,15 +400,19 @@ procedure TfrmMain.PortOpened(Sender: TObject);
 begin
   FConnecting := False;
   SetStatus(clLime, 'Connected to ' + FPort.Host);
-  Log(Format('Connected to %s:%d (rack %d, slot %d)',
-    [FPort.Host, FPort.Port, FDriver.PLCRack, FDriver.PLCSlot]));
+  if not FIsOpen then
+    Log(Format('Connected to %s:%d (rack %d, slot %d)',
+      [FPort.Host, FPort.Port, FDriver.PLCRack, FDriver.PLCSlot]));
+  FIsOpen := True;
 end;
 
 procedure TfrmMain.PortClosed(Sender: TObject);
 begin
   FConnecting := False;
   SetStatus(clGray, 'Disconnected');
-  Log('Connection closed.');
+  if FIsOpen then
+    Log('Connection closed.');
+  FIsOpen := False;
 end;
 
 procedure TfrmMain.PortOpenError(Sender: TObject);
@@ -399,7 +428,9 @@ begin
     SetStatus(clYellow, 'Connection lost - reconnecting...')
   else
     SetStatus(clRed, 'Connection lost');
-  Log('Connection to PLC lost.');
+  if FIsOpen then
+    Log('Connection to PLC lost.');
+  FIsOpen := False;
 end;
 
 { ---------- network panel ---------- }
@@ -440,7 +471,9 @@ begin
     edtIP.SetFocus;
     Exit;
   end;
-  FPort.Active := False;
+  if FPort.Active then
+    FPort.Active := False;
+  FStatTick := 0; // restart the per-second statistics
   ApplyNetworkConfig;
   Log(Format('Connecting to %s:%d ...', [FPort.Host, FPort.Port]));
   SetStatus(clYellow, 'Connecting...');
@@ -702,14 +735,47 @@ begin
   FChart.Online := FPort.Active;
   RefreshValues;
   if FPort.Active then
+  begin
+    UpdateStatistics;
     lblStats.Caption := Format(
-      'Commands/s: %d' + LineEnding +
+      'Tag reads/s: %d' + LineEnding +
       'TX: %d bytes (%d B/s)' + LineEnding +
       'RX: %d bytes (%d B/s)',
-      [FPort.CommandsPerSecond, FPort.TXBytes, FPort.TXBytesSecond,
-       FPort.RXBytes, FPort.RXBytesSecond])
+      [FReadRate, FPort.TXBytes, FTXRate, FPort.RXBytes, FRXRate]);
+  end
   else
     lblStats.Caption := 'Not connected';
+end;
+
+procedure TfrmMain.UpdateStatistics;
+var
+  now_: QWord;
+  reads: Int64;
+  mt: TMonTag;
+  dt: Double;
+begin
+  now_ := GetTickCount64;
+  reads := 0;
+  for mt in FTags do
+    reads := reads + mt.BaseTag.CommReadsOK;
+  if FStatTick = 0 then
+  begin
+    FStatTick := now_;
+    FStatTX := FPort.TXBytes;
+    FStatRX := FPort.RXBytes;
+    FStatReads := reads;
+    Exit;
+  end;
+  if now_ - FStatTick < 1000 then
+    Exit;
+  dt := (now_ - FStatTick) / 1000;
+  FTXRate := Round((FPort.TXBytes - FStatTX) / dt);
+  FRXRate := Round((FPort.RXBytes - FStatRX) / dt);
+  FReadRate := Round((reads - FStatReads) / dt);
+  FStatTick := now_;
+  FStatTX := FPort.TXBytes;
+  FStatRX := FPort.RXBytes;
+  FStatReads := reads;
 end;
 
 { ---------- writing ---------- }

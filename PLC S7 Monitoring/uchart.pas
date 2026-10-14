@@ -785,7 +785,7 @@ procedure TfrmChart.chMainAfterPaint(ASender: TChart);
 var
   c: TCanvas;
   r: TRect;
-  t: TDateTime;
+  t, tol: TDateTime;
   e: TChartEntry;
   idx, i, w, lh, bx, by, px, py: Integer;
   lines: array of string;
@@ -808,6 +808,7 @@ begin
 
   // Values of every visible series at the nearest sample to the cursor time
   t := chMain.XImageToGraph(FCrossPos.X);
+  tol := Max(2 * edtSample.Value, 1000) / MSecsPerDay;
   SetLength(lines, 1);
   SetLength(colors, 1);
   lines[0] := FormatDateTime('hh:nn:ss.zzz', t);
@@ -817,6 +818,10 @@ begin
     if not e.Series.Active then
       Continue;
     idx := NearestIndex(e.Series, t);
+    // Ignore the nearest sample if it is far from the cursor time (before the
+    // first sample, after the last one, or in a gap while offline)
+    if (idx >= 0) and (Abs(e.Series.XValue[idx] - t) > tol) then
+      idx := -1;
     SetLength(lines, Length(lines) + 1);
     SetLength(colors, Length(colors) + 1);
     colors[High(colors)] := e.Series.SeriesColor;
