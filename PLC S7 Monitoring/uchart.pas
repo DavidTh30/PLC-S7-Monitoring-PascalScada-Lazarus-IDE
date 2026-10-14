@@ -12,11 +12,21 @@ interface
 
 uses
   Classes, SysUtils, Types, Math, IniFiles, fgl, Forms, Controls, Graphics, Dialogs, StdCtrls,
-  ExtCtrls, ComCtrls, CheckLst, Spin, TAGraph, TASeries, TAIntervalSources,
+  ExtCtrls, ComCtrls, CheckLst, Spin, Menus, TAGraph, TASeries, TAIntervalSources,
   TAChartUtils, TALegend, TATypes, TATextElements, TACustomSource, TAChartAxis, TAChartAxisUtils, TATransformations, TATools,
   tag, plctag, plcnumber;
 
 type
+  { Interposer: the form's chMain is created as this class. TAChart calls
+    ZoomFull (reset view) whenever an axis transformation changes; the value
+    axes use transformations for offset/zoom, so that reset would also throw
+    away a time pan/zoom. While KeepView > 0 such resets are ignored. }
+  TChart = class(TAGraph.TChart)
+  public
+    KeepView: Integer;
+    procedure ZoomFull(AImmediateRecalc: Boolean = false); override;
+  end;
+
   TChartTagQuery = function(Source: TObject; out AName: string;
     out AValueTag: TPLCNumber; out AStatusTag: TPLCTag;
     out AIsBool: Boolean): Boolean of object;
@@ -157,6 +167,16 @@ type
     FToolset: TChartToolset;
     FZoomDrag: TZoomDragTool;
     FPanDrag: TPanDragTool;
+    FPanValue: TPanDragTool;   // left drag in the plot: vertical pan only
+    // time window last applied while live; if the view's time range still
+    // equals it, only the values are zoomed/panned and time keeps scrolling
+    FLiveXA, FLiveXB: Double;
+    FTimeHeld: Boolean;
+    // 'Live view' from the time-axis popup: follow new data while keeping the
+    // chosen window width and the gap between the newest sample and the right edge
+    FLiveCustom: Boolean;
+    FLiveWidth, FLiveGap: Double;
+    FTimeMenu: TPopupMenu;
     FZoomWheel: TZoomMouseWheelTool;
     // crosshair
     FCrossPos: TPoint;
@@ -165,6 +185,8 @@ type
     FDragEntry: TChartEntry;   // nil = shared axis drag when FDragShared
     FDragShared: Boolean;
     FDragTime: Boolean;        // panning the time axis
+    FToolsSuspended: Boolean;  // drag tools off while a drag that began outside the plot is in progress
+    FKeepXA, FKeepXB: Double;  // time range to keep across a value-only zoom box
     FDragX0: Integer;
     FDragY0: Integer;
     FDragOff0: Double;
@@ -176,12 +198,19 @@ type
     function ValueToImageY(e: TChartEntry; AValue: Double): Integer;
     procedure SetEntryOffset(e: TChartEntry; AOffset: Double);
     procedure SetEntryTransform(e: TChartEntry; AScale, AOffset: Double);
+    procedure BeginKeepView;
+    procedure EndKeepView;
     function AxisWheelZoom(APoint: TPoint; AFactor: Double): Boolean;
     procedure WheelUpBefore(ATool: TChartTool; APoint: TPoint);
     procedure WheelDownBefore(ATool: TChartTool; APoint: TPoint);
+    procedure ZoomDragBeforeUp(ATool: TChartTool; APoint: TPoint);
+    procedure ZoomDragAfterUp(ATool: TChartTool; APoint: TPoint);
     procedure CreateTools;
+    function NewestSampleTime: TDateTime;
+    procedure LiveViewClick(Sender: TObject);
     procedure ApplyZoomMode;
     procedure ApplyAxes;
+    procedure DoApplyAxes;
     function IndexOfTag(AValueTag: TPLCNumber): Integer;
     function IndexOfName(const AName: string): Integer;
     procedure DeleteEntry(AIndex: Integer);
@@ -213,6 +242,15 @@ implementation
 
 {$R *.lfm}
 
+{ TChart }
+
+procedure TChart.ZoomFull(AImmediateRecalc: Boolean);
+begin
+  if KeepView > 0 then
+    Exit;
+  inherited ZoomFull(AImmediateRecalc);
+end;
+
 const
   SeriesColors: array[0..9] of TColor = (
     $00B4771F, $000E7FFF, $002CA02C, $002827D6, $00BD6794,
@@ -227,6 +265,11 @@ const
 
   SEC = 'Chart';
   AXIS_WHEEL = 1.2; // zoom step per wheel notch on a value axis
+  // Fixed width (px) of the value labels on every value axis. With automatic
+  // sizing the strip grows/shrinks as labels change (e.g. '0' -> '-120'), which
+  // moves the plot area and therefore the time axis whenever a single value
+  // axis is offset or zoomed. A fixed width keeps the X axis untouched.
+  VALUE_LABEL_SIZE = 52;
 
 function StyleIndex(AStyle: TPenStyle): Integer;
 begin
@@ -251,6 +294,11 @@ begin
   chMain.BottomAxis.Title.Visible := True;
   chMain.LeftAxis.Title.Visible := True;
   chMain.LeftAxis.Title.LabelFont.Orientation := 900;
+  chMain.LeftAxis.LabelSize := VALUE_LABEL_SIZE;
+  chMain.LeftAxis.MarginsForMarks := False;
+  // fixed room for half a label above/below the plot instead
+  chMain.Margins.Top := 10;
+  chMain.Margins.Bottom := 10;
 
   chMain.DoubleBuffered := True;
   CreateTools;
@@ -342,6 +390,10 @@ begin
   e.Axis.Title.LabelFont.Orientation := 900;
   e.Axis.Title.LabelFont.Style := [fsBold];
   e.Axis.Grid.Visible := False;
+  e.Axis.LabelSize := VALUE_LABEL_SIZE;
+  // Don't let a label at the top/bottom edge grow the plot margins: that
+  // would shrink the plot and rescale every other value axis.
+  e.Axis.MarginsForMarks := False;
 
   ApplySeriesStyle(e, SeriesColors[FEntries.Count mod Length(SeriesColors)], 2,
     psSolid, AIsBool, False);
@@ -399,17 +451,90 @@ begin
 end;
 
 procedure TfrmChart.UpdateAxisRange;
+const
+  EPS = 1e-9; // days (~0.1 ms)
 var
-  t: TDateTime;
+  t, newA: TDateTime;
+  ext: TDoubleRect;
+  timeLive: Boolean;
 begin
   t := Now;
+  newA := t - edtWindow.Value / SecsPerDay;
+
+  // Zooming or panning only the values leaves the time range untouched;
+  // in that case keep the time axis scrolling with the live data.
+  timeLive := True;
+  if chMain.IsZoomed then
+  begin
+    ext := chMain.LogicalExtent;
+    timeLive := (Abs(ext.a.X - FLiveXA) < EPS) and (Abs(ext.b.X - FLiveXB) < EPS);
+  end;
+
   with chMain.BottomAxis.Range do
   begin
-    Min := t - edtWindow.Value / SecsPerDay;
+    Min := newA;
     Max := t;
     UseMin := True;
     UseMax := True;
   end;
+
+  if not timeLive or not chMain.IsZoomed then
+    FLiveCustom := False; // the user moved time (or reset the zoom)
+
+  if timeLive and FLiveCustom then
+  begin
+    // 'Live view': keep the window width and the distance between the newest
+    // sample and the right edge of the plot
+    ext.b.X := NewestSampleTime + FLiveGap;
+    ext.a.X := ext.b.X - FLiveWidth;
+    chMain.LogicalExtent := ext;
+    FLiveXA := ext.a.X;
+    FLiveXB := ext.b.X;
+  end
+  else
+  begin
+    if chMain.IsZoomed and timeLive then
+    begin
+      ext.a.X := newA;
+      ext.b.X := t;
+      chMain.LogicalExtent := ext;
+    end;
+    if timeLive then
+    begin
+      FLiveXA := newA;
+      FLiveXB := t;
+    end;
+  end;
+  FTimeHeld := not timeLive;
+end;
+
+function TfrmChart.NewestSampleTime: TDateTime;
+var
+  e: TChartEntry;
+begin
+  Result := 0;
+  for e in FEntries do
+    if e.Series.Count > 0 then
+      Result := Max(Result, e.Series.XValue[e.Series.Count - 1]);
+  if Result = 0 then
+    Result := Now; // no data yet: follow the clock
+end;
+
+procedure TfrmChart.LiveViewClick(Sender: TObject);
+var
+  ext: TDoubleRect;
+begin
+  if FPaused then
+    btnPauseClick(nil); // live means running
+  if not chMain.IsZoomed then
+    Exit; // already the normal live view (follows the newest data)
+  ext := chMain.LogicalExtent;
+  FLiveWidth := ext.b.X - ext.a.X;
+  FLiveGap := ext.b.X - NewestSampleTime;
+  FLiveXA := ext.a.X; // the current time range counts as 'live'
+  FLiveXB := ext.b.X;
+  FLiveCustom := True;
+  UpdateAxisRange;
 end;
 
 procedure TfrmChart.tmrSampleTimer(Sender: TObject);
@@ -419,8 +544,12 @@ var
 begin
   // While zoomed the view stays where the user put it; Reset zoom returns to live
   btnResetZoom.Enabled := chMain.IsZoomed;
-  if chMain.IsZoomed then
+  if chMain.IsZoomed and FTimeHeld then
     lblZoomState.Caption := 'Zoomed (live held)'
+  else if FLiveCustom and not FPaused then
+    lblZoomState.Caption := 'Live (window kept)'
+  else if chMain.IsZoomed and not FPaused then
+    lblZoomState.Caption := 'Live (values zoomed)'
   else if FPaused then
     lblZoomState.Caption := 'Paused'
   else
@@ -502,6 +631,16 @@ begin
 end;
 
 procedure TfrmChart.ApplyAxes;
+begin
+  BeginKeepView; // switches axis transforms, which would reset the view
+  try
+    DoApplyAxes;
+  finally
+    EndKeepView;
+  end;
+end;
+
+procedure TfrmChart.DoApplyAxes;
 var
   sep, gridDone: Boolean;
   e: TChartEntry;
@@ -512,10 +651,16 @@ begin
 
   // In separate mode every series is mapped onto 0..1, so pin the vertical
   // extent there; each axis then shows exactly its own range.
-  chMain.Extent.YMin := 0;
-  chMain.Extent.YMax := 1;
-  chMain.Extent.UseYMin := sep;
-  chMain.Extent.UseYMax := sep;
+  // Only write the Extent when it really changes: TChart treats ANY change
+  // of its Extent as 'reset zoom' (StyleChanged -> ZoomFull), which would
+  // throw away a time pan/zoom whenever a single value axis is adjusted.
+  with chMain.Extent do
+  begin
+    if YMin <> 0 then YMin := 0;
+    if YMax <> 1 then YMax := 1;
+    if UseYMin <> sep then UseYMin := sep;
+    if UseYMax <> sep then UseYMax := sep;
+  end;
 
   gridDone := False;
   for e in FEntries do
@@ -559,13 +704,22 @@ procedure TfrmChart.CreateTools;
 begin
   FToolset := TChartToolset.Create(Self);
 
-  // Left drag: zoom box. Dragging right-to-left restores the full view.
+  // Ctrl + left drag: zoom box. Dragging right-to-left restores the full view.
   FZoomDrag := TZoomDragTool.Create(FToolset);
   FZoomDrag.Toolset := FToolset;
-  FZoomDrag.Shift := [ssLeft];
+  FZoomDrag.Shift := [ssCtrl, ssLeft];
   FZoomDrag.Brush.Style := bsClear;
   FZoomDrag.Frame.Color := clGray;
   FZoomDrag.Frame.Style := psDash;
+  FZoomDrag.OnBeforeMouseUp := @ZoomDragBeforeUp;
+  FZoomDrag.OnAfterMouseUp := @ZoomDragAfterUp;
+
+  // Left drag: pan the values up/down (time keeps scrolling live)
+  FPanValue := TPanDragTool.Create(FToolset);
+  FPanValue.Toolset := FToolset;
+  FPanValue.Shift := [ssLeft];
+  FPanValue.Directions := [pdUp, pdDown];
+  FPanValue.ActiveCursor := crSizeNS;
 
   // Right drag: pan
   FPanDrag := TPanDragTool.Create(FToolset);
@@ -581,29 +735,39 @@ begin
   FZoomWheel.OnBeforeMouseWheelDown := @WheelDownBefore;
 
   chMain.Toolset := FToolset;
+
+  // Right-click on the time axis
+  FTimeMenu := TPopupMenu.Create(Self);
+  FTimeMenu.Items.Add(TMenuItem.Create(FTimeMenu));
+  FTimeMenu.Items[0].Caption := 'Live view';
+  FTimeMenu.Items[0].Hint := 'Follow new data, keeping the current time span and the gap to the right edge';
+  FTimeMenu.Items[0].OnClick := @LiveViewClick;
 end;
 
 procedure TfrmChart.ApplyZoomMode;
 const
   WHEEL = 1.2;
 begin
+  // TZoomMouseWheelTool zooms by (Z, Z*R) on wheel down and by (1/Z, 1/(Z*R))
+  // on wheel up (X, Y). Z < 1 makes wheel up zoom in, matching the wheel on
+  // the value and time axes (AXIS_WHEEL).
   case cbZoomMode.ItemIndex of
-    1: begin // time axis only
+    1: begin // time axis only: Y factor Z*R = 1
          FZoomDrag.RatioLimit := zrlFixedY;
          FPanDrag.Directions := [pdLeft, pdRight];
-         FZoomWheel.ZoomFactor := WHEEL;
-         FZoomWheel.ZoomRatio := 1 / WHEEL;
+         FZoomWheel.ZoomFactor := 1 / WHEEL;
+         FZoomWheel.ZoomRatio := WHEEL;
        end;
-    2: begin // value axis only
+    2: begin // value axis only: X factor Z = 1
          FZoomDrag.RatioLimit := zrlFixedX;
          FPanDrag.Directions := [pdUp, pdDown];
          FZoomWheel.ZoomFactor := 1;
-         FZoomWheel.ZoomRatio := WHEEL;
+         FZoomWheel.ZoomRatio := 1 / WHEEL;
        end;
   else     // both axes
     FZoomDrag.RatioLimit := zrlNone;
     FPanDrag.Directions := [pdLeft, pdUp, pdRight, pdDown];
-    FZoomWheel.ZoomFactor := WHEEL;
+    FZoomWheel.ZoomFactor := 1 / WHEEL;
     FZoomWheel.ZoomRatio := 1;
   end;
 end;
@@ -624,32 +788,46 @@ end;
 function TfrmChart.AxisEntryAt(X, Y: Integer): TChartEntry;
 var
   e: TChartEntry;
+  r: TRect;
+  cy, dx: Integer;
 begin
+  // Anywhere left of the plot belongs to a value axis: its labels, its title
+  // (left of the labels) and the margin above/below. Scan to the right from
+  // the mouse until a visible axis' label strip is hit.
   Result := nil;
   if not chkSeparateAxes.Checked then
     Exit;
-  // IsPointInside covers the axis marks strip; also accept the title just left of it
-  for e in FEntries do
-    if e.Axis.Visible and e.Axis.IsPointInside(Point(X, Y)) then
-      Exit(e);
-  for e in FEntries do
-    if e.Axis.Visible and e.Axis.IsPointInside(Point(X + 18, Y)) then
-      Exit(e);
+  r := chMain.ClipRect;
+  if (X >= r.Left) or (Y < r.Top - 30) or (Y > r.Bottom + 30) then
+    Exit;
+  cy := EnsureRange(Y, r.Top + 1, r.Bottom - 1);
+  dx := 0;
+  while X + dx < r.Left do
+  begin
+    for e in FEntries do
+      if e.Axis.Visible and e.Axis.IsPointInside(Point(X + dx, cy)) then
+        Exit(e);
+    Inc(dx, 2);
+  end;
 end;
 
 function TfrmChart.SharedAxisAt(X, Y: Integer): Boolean;
+var
+  r: TRect;
 begin
-  Result := chMain.LeftAxis.Visible and
-    (chMain.LeftAxis.IsPointInside(Point(X, Y)) or
-     chMain.LeftAxis.IsPointInside(Point(X + 18, Y)));
+  r := chMain.ClipRect;
+  Result := chMain.LeftAxis.Visible and (X < r.Left) and
+    (Y >= r.Top - 30) and (Y <= r.Bottom + 30);
 end;
 
 function TfrmChart.TimeAxisAt(X, Y: Integer): Boolean;
+var
+  r: TRect;
 begin
-  // IsPointInside covers the time labels strip; also accept the title below it
-  Result := chMain.BottomAxis.Visible and
-    (chMain.BottomAxis.IsPointInside(Point(X, Y)) or
-     chMain.BottomAxis.IsPointInside(Point(X, Y - 18)));
+  // The band below the plot: time labels and the 'Time' title (not the legend)
+  r := chMain.ClipRect;
+  Result := chMain.BottomAxis.Visible and (X >= r.Left - 10) and
+    (X <= r.Right + 10) and (Y > r.Bottom) and (Y <= r.Bottom + 45);
 end;
 
 procedure TfrmChart.SetEntryOffset(e: TChartEntry; AOffset: Double);
@@ -657,10 +835,32 @@ begin
   SetEntryTransform(e, e.OffT.Scale, AOffset);
 end;
 
+{ TAChart resets the whole view (TChartAxis.StyleChanged -> ZoomFull) whenever
+  an axis transformation changes. Every separate value axis implements its
+  offset / zoom / scaling as transformations, so adjusting one Y axis would
+  also throw away a time pan or zoom. Wrap transform changes in
+  BeginKeepView/EndKeepView; the interposed TChart ignores ZoomFull meanwhile.
+  (All series axes map onto the same 0..1 graph range, so the current view
+  stays valid.) }
+procedure TfrmChart.BeginKeepView;
+begin
+  Inc(chMain.KeepView);
+end;
+
+procedure TfrmChart.EndKeepView;
+begin
+  Dec(chMain.KeepView);
+end;
+
 procedure TfrmChart.SetEntryTransform(e: TChartEntry; AScale, AOffset: Double);
 begin
-  e.OffT.Scale := AScale;
-  e.OffT.Offset := AOffset;
+  BeginKeepView;
+  try
+    e.OffT.Scale := AScale;
+    e.OffT.Offset := AOffset;
+  finally
+    EndKeepView;
+  end;
   if (FEntries.IndexOf(e) = clbSeries.ItemIndex) and not FUpdating then
   begin
     FUpdating := True;
@@ -720,22 +920,64 @@ begin
   end;
 end;
 
+procedure TfrmChart.ZoomDragBeforeUp(ATool: TChartTool; APoint: TPoint);
+begin
+  FKeepXA := chMain.LogicalExtent.a.X;
+  FKeepXB := chMain.LogicalExtent.b.X;
+end;
+
+procedure TfrmChart.ZoomDragAfterUp(ATool: TChartTool; APoint: TPoint);
+var
+  ext: TDoubleRect;
+begin
+  // In 'Value only' mode the zoom box (zrlFixedX) resets time to the FULL
+  // range, which would undo a time pan/zoom. Put the time range back.
+  if cbZoomMode.ItemIndex <> 2 then
+    Exit;
+  ext := chMain.LogicalExtent;
+  if (ext.a.X <> FKeepXA) or (ext.b.X <> FKeepXB) then
+  begin
+    ext.a.X := FKeepXA;
+    ext.b.X := FKeepXB;
+    chMain.LogicalExtent := ext;
+  end;
+end;
+
 procedure TfrmChart.WheelUpBefore(ATool: TChartTool; APoint: TPoint);
 begin
-  if AxisWheelZoom(APoint, AXIS_WHEEL) then
-    ATool.Handled; // keep the chart-wide wheel zoom out of it
+  // Outside the plot the wheel only ever acts on the axis under the mouse
+  // (or nothing): the chart-wide zoom, which also moves time, is kept out.
+  if not PtInRect(chMain.ClipRect, APoint) then
+  begin
+    AxisWheelZoom(APoint, AXIS_WHEEL);
+    ATool.Handled;
+  end;
 end;
 
 procedure TfrmChart.WheelDownBefore(ATool: TChartTool; APoint: TPoint);
 begin
-  if AxisWheelZoom(APoint, 1 / AXIS_WHEEL) then
+  if not PtInRect(chMain.ClipRect, APoint) then
+  begin
+    AxisWheelZoom(APoint, 1 / AXIS_WHEEL);
     ATool.Handled;
+  end;
 end;
 
 procedure TfrmChart.chMainMouseDown(Sender: TObject; Button: TMouseButton;
   Shift: TShiftState; X, Y: Integer);
 begin
-  // Only reached outside the plot area: the zoom/pan tools take clicks inside it
+  // Reached when no chart tool took the press, i.e. outside the plot area.
+  // TPanDragTool activates on any button-down mouse move, even when the press
+  // started outside the plot, and would then hijack an axis drag (all value
+  // axes panned together / time drag swallowed). Switch the drag tools off
+  // until the button is released so only the axis handler sees this drag.
+  if not PtInRect(chMain.ClipRect, Point(X, Y)) then
+  begin
+    FZoomDrag.Enabled := False;
+    FPanValue.Enabled := False;
+    FPanDrag.Enabled := False;
+    FToolsSuspended := True;
+  end;
   if Button <> mbLeft then
     Exit;
   FDragEntry := AxisEntryAt(X, Y);
@@ -814,6 +1056,15 @@ begin
   FDragEntry := nil;
   FDragShared := False;
   FDragTime := False;
+  if FToolsSuspended then
+  begin
+    FZoomDrag.Enabled := True;
+    FPanValue.Enabled := True;
+    FPanDrag.Enabled := True;
+    FToolsSuspended := False;
+  end;
+  if (Button = mbRight) and TimeAxisAt(X, Y) then
+    FTimeMenu.PopUp; // at the mouse position
 end;
 
 procedure TfrmChart.chMainDblClick(Sender: TObject);
@@ -1070,8 +1321,14 @@ begin
   FEntries[i].AutoScale := chkSAuto.Checked;
   FEntries[i].YMin := fseSMin.Value;
   FEntries[i].YMax := fseSMax.Value;
-  FEntries[i].OffT.Offset := fseSOffset.Value / 100;
-  FEntries[i].OffT.Scale := fseSZoom.Value;
+  // Offset/zoom are normally set by dragging / wheeling the axis, which also
+  // updates these boxes; their change events can arrive late (after
+  // FUpdating is cleared) with rounded values. Only take them from the boxes
+  // while the user is actually editing them.
+  if fseSOffset.Focused then
+    SetEntryOffset(FEntries[i], fseSOffset.Value / 100);
+  if fseSZoom.Focused then
+    SetEntryTransform(FEntries[i], fseSZoom.Value, FEntries[i].OffT.Offset);
   fseSMin.Enabled := chkSAuto.Enabled and not chkSAuto.Checked;
   fseSMax.Enabled := fseSMin.Enabled;
   ApplyAxes;

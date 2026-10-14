@@ -90,7 +90,7 @@ object frmChart: TfrmChart
       Height = 23
       Top = 8
       Width = 100
-      Hint = 'Left drag = zoom box, right drag = pan, wheel = zoom'
+      Hint = 'Plot area: left drag = pan values, Ctrl+left drag = zoom box, right drag = pan, wheel = zoom'
       ItemHeight = 15
       ItemIndex = 0
       Items.Strings = (
